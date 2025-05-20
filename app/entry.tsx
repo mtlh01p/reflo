@@ -11,7 +11,8 @@ const STORAGE_KEY = '@settings:selectedRefloTheme';
 const STORAGE_KEY2 = '@settings:selectedRefloLanguage';
 const CHAT_STORAGE_KEY = '@chat:messages';
 const LAST_OPENED_DATE_KEY = '@app:lastOpenedDate';
-const EMOTION_SCORE_PREFIX = '@chat:emotionScore:'; // Prefix to include date
+const EMOTION_SCORE_PREFIX = '@chat:emotionScore:';
+const TOPIC_DESCRIPTION_PREFIX = '@chat:topicDescription:';
 
 const OPENAI_API_KEY = Constants.expoConfig?.extra?.openaiApiKey as string;
 
@@ -26,9 +27,11 @@ export default function EntryScreen() {
   const [selectedRefloLanguage, setSelectedRefloLanguage] = useState('');
   const [hasSentInitialMessage, setHasSentInitialMessage] = useState(false);
   const [emotionScore, setEmotionScore] = useState<number | null>(null);
+  const [topicDescription, setTopicDescription] = useState<string | null>(null);
 
   const getCurrentDateString = () => new Date().toDateString();
   const getEmotionScoreKeyWithDate = () => `${EMOTION_SCORE_PREFIX}${getCurrentDateString()}`;
+  const getTopicDescriptionKeyWithDate = () => `${TOPIC_DESCRIPTION_PREFIX}${getCurrentDateString()}`;
 
   useEffect(() => {
     const loadRefloTheme = async () => {
@@ -49,20 +52,24 @@ export default function EntryScreen() {
       }
     };
 
-    const loadEmotionScore = async () => {
+    const loadEmotionScoreAndTopic = async () => {
       try {
         const storedScore = await AsyncStorage.getItem(getEmotionScoreKeyWithDate());
         if (storedScore) {
           setEmotionScore(parseInt(storedScore, 10));
         }
+        const storedTopic = await AsyncStorage.getItem(getTopicDescriptionKeyWithDate());
+        if (storedTopic) {
+          setTopicDescription(storedTopic);
+        }
       } catch (error) {
-        console.error('Failed to load emotion score for today:', error);
+        console.error('Failed to load emotion score or topic for today:', error);
       }
     };
 
     loadRefloTheme();
     loadRefloLanguage();
-    loadEmotionScore();
+    loadEmotionScoreAndTopic();
   }, []);
 
   useEffect(() => {
@@ -114,56 +121,102 @@ export default function EntryScreen() {
     AsyncStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages));
   }, [messages]);
 
-  const analyzeEmotion = async () => {
-    if (messages.length > 0) {
-      setLoading(true);
-      try {
-        const chatHistory = messages.map(msg => `${msg.user}: ${msg.gpt}`).join('\n');
-        const prompt = `Analyze the overall emotion of the following chat history and return an integer representing the emotion score (0-20 Awful, 21-40 Bad, 41-60 Okay, 61-80 Good, 81-100 Great). Only return the integer:\n\n${chatHistory}`;
+const analyzeEmotionAndTopic = async () => {
+  if (messages.length > 0) {
+    setLoading(true);
+    try {
+      const chatHistory = messages.map(msg => `${msg.user}: ${msg.gpt}`).join('\n');
 
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${OPENAI_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: 'gpt-3.5-turbo',
-            messages: [
-              { role: 'system', content: 'You are an AI that analyzes the emotion of text and returns an integer score.' },
-              { role: 'user', content: prompt },
-            ],
-          }),
-        });
+      // --- Separate Emotion Analysis ---
+      const emotionPrompt = `Analyze the overall emotion expressed in the following chat history. Return a single word describing the dominant emotion from the following categories: Awful, Bad, Okay, Good, Great. If the emotion is neutral or cannot be clearly categorized into these, return 'Okay'. Also, return a score for its intensity on a scale of 1 to 5 (1 being weak, 5 being strong), separated by a comma. TRY TO RETURN A VALUE CLOSER TO THE EXTREME FOR THE EMOTION CATEGORY, AND AVOID BEING TOO CLOSE TO THE MEDIAN.`;
 
-        const data = await res.json();
-        const emotionScoreStr = data.choices?.[0]?.message?.content?.trim();
-        const parsedScore = parseInt(emotionScoreStr || '', 10);
+      const emotionRes = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'gpt-3.5-turbo', // Consider a more advanced model if available
+          messages: [
+            { role: 'system', content: 'Analyze the emotion in the provided text and categorize it, defaulting to \'Okay\' if neutral or unclear.' },
+            { role: 'user', content: emotionPrompt + '\n\n' + chatHistory },
+          ],
+        }),
+      });
 
-        if (!isNaN(parsedScore)) {
-          setEmotionScore(parsedScore);
-          await AsyncStorage.setItem(getEmotionScoreKeyWithDate(), parsedScore.toString());
+      const emotionData = await emotionRes.json();
+      const emotionContent = emotionData.choices?.[0]?.message?.content?.trim();
+      console.log('Raw Emotion Content:', emotionContent); // Keep this for debugging
+      if (emotionContent) {
+        const [dominantEmotion, intensityStr] = emotionContent.split(',').map(s => s.trim());
+        const intensity = parseInt(intensityStr || '', 10);
+        if (['Awful', 'Bad', 'Okay', 'Good', 'Great'].includes(dominantEmotion) && !isNaN(intensity) && intensity >= 1 && intensity <= 5) {
+          // Store dominantEmotion and intensity
+          console.log('Dominant Emotion:', dominantEmotion, 'Intensity:', intensity);
+          await AsyncStorage.setItem(`${EMOTION_SCORE_PREFIX}${getCurrentDateString()}:emotion`, dominantEmotion);
+          await AsyncStorage.setItem(`${EMOTION_SCORE_PREFIX}${getCurrentDateString()}:intensity`, intensity.toString());
         } else {
-          console.error('Failed to parse emotion score:', emotionScoreStr);
+          console.error('Failed to parse emotion data:', emotionContent);
+          // Optionally, you could add a fallback here to store 'Okay' if parsing fails
+          // await AsyncStorage.setItem(`${EMOTION_SCORE_PREFIX}${getCurrentDateString()}:emotion`, 'Okay');
+          // await AsyncStorage.setItem(`${EMOTION_SCORE_PREFIX}${getCurrentDateString()}:intensity`, '3'); // Or some default intensity
         }
-      } catch (error) {
-        console.error('Error analyzing emotion:', error);
-      } finally {
-        setLoading(false);
+      } else {
+        console.error('Failed to get emotion content from OpenAI.');
       }
+
+      // --- Separate Topic Analysis ---
+      let topicPrompt = ``;
+      if(selectedRefloLanguage === 'English') {
+        topicPrompt = `Identify the main topics or themes discussed in the following chat history. Return a concise description of the key themes in no more than 9 words. If multiple distinct topics are present, separate them with " , ". Answer in English.`;
+      }else if(selectedRefloLanguage === 'Indonesia') {
+        topicPrompt = `Identifikasi topik atau tema utama yang dibicarakan dalam riwayat percakapan ini. Berikan deskripsi pendek ide pokok secara tepat hanya dalam 9 kata-kata. Jika ada beberapa topik yang berbeda, pisahkan dengan " , ". Sampaikan dalam bahasa Indonesia.`;
+      }else{
+        topicPrompt = `确定此对话历史中讨论的主要话题或主题。仅用 9 个字简要描述主要思想。如果有多个不同的主题，则用“ , ”分隔。用中文回答`;
+      }
+
+      const topicRes = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'gpt-3.5-turbo', // Consider a more advanced model if available
+          messages: [
+            { role: 'system', content: 'Identify the key topics in the provided text.' },
+            { role: 'user', content: topicPrompt + '\n\n' + chatHistory },
+          ],
+        }),
+      });
+
+      const topicData = await topicRes.json();
+      const topicDescriptionContent = topicData.choices?.[0]?.message?.content?.trim();
+      if (topicDescriptionContent) {
+        setTopicDescription(topicDescriptionContent);
+        await AsyncStorage.setItem(getTopicDescriptionKeyWithDate(), topicDescriptionContent);
+      } else {
+        console.error('Failed to get topic description from OpenAI.');
+      }
+
+    } catch (error) {
+      console.error('Error analyzing emotion and topic:', error);
+    } finally {
+      setLoading(false);
     }
-  };
+  }
+};
 
   useEffect(() => {
     return () => {
-      // This function will be called when the component is unmounted
       if (!loading && messages.length > 0 && router.canGoBack()) {
-        analyzeEmotion();
+        analyzeEmotionAndTopic();
       }
     };
   }, [router, messages, loading]);
 
-const handleSubmit = async () => {
+  const handleSubmit = async () => {
     const userMessage = inputText.trim();
     if (!userMessage || loading) return;
 

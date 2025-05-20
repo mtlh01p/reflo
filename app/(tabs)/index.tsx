@@ -104,15 +104,16 @@ const styles = StyleSheet.create({
   },
   titleTextDark: {
     color: 'white',
-    fontSize: 50,
+    fontSize: 40,
   },
   titleTextLight: {
     color: 'black',
-    fontSize: 50,
+    fontSize: 40,
   },
   mainContainer: {
     flexGrow: 1, 
     padding: 32, 
+    paddingTop: 60,
   },
   background: {
     flex: 1,
